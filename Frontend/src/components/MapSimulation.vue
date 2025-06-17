@@ -1,3 +1,91 @@
+<script setup lang="ts">
+import "leaflet/dist/leaflet.css";
+import { LMap, LTileLayer, LMarker, LPolyline } from "@vue-leaflet/vue-leaflet";
+import { ref, computed, watch } from "vue";
+import L from "leaflet";
+import type { Route } from '../pages/Dashboard.vue';
+
+interface Port {
+  id: number;
+  name: string;
+  lat: number;
+  lon: number;
+}
+
+const props = defineProps<{
+  routes: Route[];
+  selectedRouteIndex: number;
+}>();
+
+const zoom = ref(10);
+const center = ref<[number, number]>([59.94, 30.23]);
+const ports = ref<Port[]>([]);
+const waterPaths = ref<[number, number][][]>([]);
+const leafletMap = ref<L.Map | null>(null);
+const routes = computed(() => props.routes || []);
+const otherRoutes = computed(() =>
+  routes.value.filter((r, idx) => idx !== props.selectedRouteIndex && r?.route?.length > 1)
+);
+
+const portIcon = L.icon({
+  iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684908.png', // иконка корабля
+  iconSize: [32, 32], // размер иконки
+  iconAnchor: [16, 32], // точка привязки к координате
+  popupAnchor: [0, -32], // позиция попапа относительно иконки
+});
+
+const loadPorts = async () => {
+  try {
+    const res = await fetch("http://localhost:8000/api/api/ports/");
+    const data = await res.json();
+    ports.value = data.map((port: any) => ({
+      id: port.id,
+      name: port.name,
+      lat: port.latitude,
+      lon: port.longitude,
+    }));
+  } catch (error) {
+    console.error("Error loading ports:", error);
+  }
+};
+
+const onMapReady = (mapInstance: L.Map) => {
+  leafletMap.value = mapInstance;
+  loadPorts();
+  // fetchWaterGraph()
+};
+
+const currentRoute = computed(() => {
+  if (
+    props.routes &&
+    props.routes.length > 0 &&
+    props.selectedRouteIndex >= 0 &&
+    props.selectedRouteIndex < props.routes.length
+  ) {
+    return props.routes[props.selectedRouteIndex];
+  }
+  return { route: [] } as unknown as Route;
+});
+
+watch(
+  currentRoute,
+  (route) => {
+    if (!leafletMap.value) return;
+
+    if (!route || !Array.isArray(route.route) || route.route.length < 2) {
+      leafletMap.value.setView(center.value, zoom.value);
+      return;
+    }
+
+    const bounds = L.latLngBounds(
+      route.route.map(([lat, lon]) => L.latLng(lat, lon))
+    );
+    leafletMap.value.fitBounds(bounds, { padding: [50, 50] });
+  },
+  { immediate: true }
+);
+</script>
+
 <template>
   <l-map
     :zoom="zoom"
@@ -6,35 +94,54 @@
     @ready="onMapReady"
   >
     <l-tile-layer
-      :url="'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'"
-      :attribution="'&copy; <a href=\'https://www.openstreetmap.org/copyright\'>OpenStreetMap</a> contributors &copy; <a href=\'https://carto.com/attributions\'>CARTO</a>'"
-      :subdomains="'abcd'"
+      url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+      subdomains="abcd"
       :max-zoom="20"
     />
 
-    <!-- Отображение маршрута -->
+    <!-- Все маршруты кроме выбранного серым цветом -->
     <l-polyline
-      v-if="routeCoordinates?.length > 1"
-      :lat-lngs="routeCoordinates"
-      color="blue"
-      weight="5"
-      opacity="0.7"
-    />
+  v-for="(route, idx) in otherRoutes"
+  :key="`alt-route-${idx}`"
+  :lat-lngs="route.route"
+  color="#999999"
+  weight="3"
+  opacity="0.3"
+/>
 
-    <!-- Отображение морских путей -->
+    <!-- Выбранный маршрут зеленым -->
+    <l-polyline
+  v-if="currentRoute && currentRoute.route.length > 1"
+  :lat-lngs="currentRoute.route"
+  color="limegreen"
+  weight="7"
+  opacity="0.3"
+  class="glow-blur"
+/>
+<l-polyline
+  v-if="currentRoute && currentRoute.route.length > 1"
+  :lat-lngs="currentRoute.route"
+  color="limegreen"
+  weight="2"
+  opacity="0.9"
+/>
+
+    <!-- Морские пути -->
     <l-polyline
       v-for="(path, index) in waterPaths"
-      :key="index"
+      :key="`water-path-${index}`"
       :lat-lngs="path"
       color="green"
       weight="3"
       opacity="0.5"
     />
 
-    <!-- Отображение портов -->
+    <!-- Порты -->
     <l-marker
-      v-for="(port, index) in ports"
-      :key="index"
+      v-for="port in ports"
+      :icon="portIcon"
+      :key="port.id"
       :lat-lng="[port.lat, port.lon]"
     >
       <template #popup>
@@ -44,117 +151,14 @@
   </l-map>
 </template>
 
-<script lang="ts">
-import "leaflet/dist/leaflet.css";
-import { LMap, LTileLayer, LMarker, LPolyline } from "@vue-leaflet/vue-leaflet";
-import { defineComponent, ref, watch } from "vue";
-import L from "leaflet";
-
-export default defineComponent({
-  components: {
-    LMap,
-    LTileLayer,
-    LMarker,
-    LPolyline,
-  },
-  props: {
-    routeCoordinates: {
-      type: Array as () => [number, number][],
-      required: true,
-    },
-  },
-  setup(props) {
-    const zoom = ref(10);
-    const center = ref([59.94, 30.23]);
-    const ports = ref([]); // Список портов
-    const waterPaths = ref([]); // Список водных путей
-    const leafletMap = ref<L.Map | null>(null);
-
-    // Функция для загрузки портов
-    const loadPorts = async () => {
-      const res = await fetch("http://localhost:8000/api/api/ports/");
-      const data = await res.json();
-      ports.value = data.map((port: any) => ({
-        name: port.name,
-        lat: port.latitude,
-        lon: port.longitude,
-      }));
-    };
-
-    // Функция для загрузки водных путей из Overpass API
-    const loadWaterPaths = async (lat: number, lon: number, radius: number = 20000) => {
-      const overpassUrl = "http://overpass-api.de/api/interpreter";
-      const overpassQuery = `
-        [out:json];
-        way["waterway"](around:${radius},${lat},${lon});
-        out body;
-        >;
-        out skel qt;
-      `;
-      const response = await fetch(overpassUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: `data=${overpassQuery}`,
-      });
-
-      const data = await response.json();
-
-      // Обработка данных, преобразуем в список координат
-      const paths = [];
-      data.elements.forEach((element: any) => {
-        if (element.nodes) {
-          const path = [];
-          element.nodes.forEach((nodeId: any) => {
-            const node = data.elements.find((el: any) => el.id === nodeId);
-            if (node) {
-              path.push([node.lat, node.lon]);
-            }
-          });
-          if (path.length > 0) {
-            paths.push(path);
-          }
-        }
-      });
-
-      waterPaths.value = paths;
-    };
-
-    // Сохраняем Leaflet карту при ready
-    const onMapReady = (mapInstance: L.Map) => {
-      leafletMap.value = mapInstance;
-      loadPorts(); // Загружаем порты при инициализации карты
-      loadWaterPaths(center.value[0], center.value[1]); // Загружаем водные пути для начальной точки карты
-    };
-
-    watch(
-      () => props.routeCoordinates,
-      (newCoords) => {
-        if (!leafletMap.value || newCoords.length < 2) return;
-
-        const bounds = L.latLngBounds(
-          newCoords.map((coord) => L.latLng(coord[0], coord[1]))
-        );
-        leafletMap.value.fitBounds(bounds);
-      },
-      { immediate: true }
-    );
-
-    return {
-      zoom,
-      center,
-      ports,
-      waterPaths,
-      onMapReady,
-    };
-  },
-});
-</script>
-
 <style scoped>
+/* Можно убрать, т.к. стиль инлайн, но если хотите использовать id, добавить в l-map */
 #map {
-  width: 100%;
-  height: 100%;
+  height: 100vh;
+  width: 100vw;
+}
+
+.glow-blur {
+  filter: url(#blur-filter);;
 }
 </style>
